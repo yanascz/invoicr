@@ -1,0 +1,24 @@
+{
+  "number": "20261004",
+  "supplier": {
+    "name": "Ing. Jan Novák",
+    "street": "Dělnická 475/43",
+    "city": "170 00 Praha 7",
+    "ico": "25596641",
+    "iban": "CZ2930300000002100073142"
+  },
+  "customer": {
+    "name": "Česká národní banka",
+    "street": "Na Příkopě 864/28",
+    "city": "115 03 Praha 1",
+    "ico": "48136450",
+    "dic": "CZ48136450"
+  },
+  "issued": "2026-10-04",
+  "due": "2026-10-18",
+  "note": "Fakturu lze zaplatit i hotově, nebo bitcoinem.",
+  "items": [
+    { "title": "Konzultace k Ankapu", "hours": 21, "rate": "1000.00" },
+    { "title": "Vývoj software na míru", "hours": 73, "rate": "1200.00" }
+  ]
+}
