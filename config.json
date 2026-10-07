@@ -1,0 +1,18 @@
+{
+  "supplier": {
+    "name": "Ing. Jan Novák",
+    "street": "Dělnická 475/43",
+    "city": "170 00 Praha 7",
+    "ico": "25596641",
+    "iban": "CZ2930300000002100073142"
+  },
+  "customers": {
+    "cnb": {
+      "name": "Česká národní banka",
+      "street": "Na Příkopě 864/28",
+      "city": "115 03 Praha 1",
+      "ico": "48136450",
+      "dic": "CZ48136450"
+    }
+  }
+}

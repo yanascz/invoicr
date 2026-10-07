@@ -1,0 +1,315 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export LC_ALL=C
+
+readonly PROG="${0##*/}"
+readonly INVOICR_HOME="$HOME/.invoicr"
+readonly CONFIG_FILE="$INVOICR_HOME/config.json"
+readonly TEMPLATE_FILE="$INVOICR_HOME/invoice.typ"
+readonly INVOICES_DIR="$INVOICR_HOME/invoices"
+readonly INVOICE_PREFIX="faktura-"
+readonly DUE_DAYS=14
+
+# ---------------------------------------------------------------------------
+# dispatch
+# ---------------------------------------------------------------------------
+
+main() {
+  if [[ $# -eq 0 ]]; then
+    usage
+    return 0
+  fi
+
+  case "$1" in
+    invoice) shift ;;
+    *) usage_error "unknown command: $1" ;;
+  esac
+
+  cmd_invoice "$@"
+}
+
+# ---------------------------------------------------------------------------
+# usage
+# ---------------------------------------------------------------------------
+
+usage() {
+  cat <<EOF
+usage: $PROG invoice -c <customer> -i <item> [-i <item>...] [-n <note>] [-o <dir>]
+
+Generate a PDF invoice into the current directory, or into <dir> if given, and
+store the invoice JSON under $(display_path "$INVOICES_DIR")/<year>/.
+
+Configuration is read from $(display_path "$CONFIG_FILE").
+
+commands:
+  invoice    create a new invoice
+
+options:
+  -c, --customer <id>   customer id, a key under "customers" in config.json (required)
+  -i, --item <spec>     invoice line item, repeatable (required, at least one)
+  -n, --note <text>     note printed on the invoice
+  -o, --out-dir <dir>   directory for the PDF; must already exist
+                        (default: the current directory)
+
+item spec:
+  "<title> h=<hours> r=<rate>"
+
+  h  hours, whole number
+  r  rate per hour, with or without decimals
+
+examples:
+  $PROG invoice -c cnb -n "Fakturu lze zaplatit i hotově, nebo bitcoinem." \\
+    -i "Konzultace k Ankapu h=21 r=1000.00" \\
+    -i "Vývoj software na míru h=73 r=1200.00"
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# invoice
+# ---------------------------------------------------------------------------
+
+cmd_invoice() {
+  local customer="" note="" has_note_flag=0 out_dir="."
+  local -a item_specs=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -c | --customer)
+        [[ $# -ge 2 ]] || usage_error "$1 requires an argument"
+        customer="$2"
+        shift 2
+        ;;
+      -n | --note)
+        [[ $# -ge 2 ]] || usage_error "$1 requires an argument"
+        note="$2"
+        has_note_flag=1
+        shift 2
+        ;;
+      -i | --item)
+        [[ $# -ge 2 ]] || usage_error "$1 requires an argument"
+        item_specs+=("$2")
+        shift 2
+        ;;
+      -o | --out-dir)
+        [[ $# -ge 2 ]] || usage_error "$1 requires an argument"
+        [[ -n $2 ]] || usage_error "$1 requires a non-empty argument"
+        out_dir="$2"
+        # Avoid a doubled separator in the path we report back.
+        if [[ ${#out_dir} -gt 1 ]]; then
+          out_dir="${out_dir%/}"
+        fi
+        shift 2
+        ;;
+      *) usage_error "unexpected argument: $1" ;;
+    esac
+  done
+
+  [[ -n $customer ]] || usage_error "missing required option -c/--customer"
+  [[ ${#item_specs[@]} -gt 0 ]] || usage_error "missing required option -i/--item"
+
+  # Settle the output directory before anything is written, so an unusable one
+  # cannot leave scratch files or consume an invoice number.
+  if [[ ! -e $out_dir ]]; then
+    die "output directory does not exist: $out_dir"
+  elif [[ ! -d $out_dir ]]; then
+    die "not a directory: $out_dir"
+  fi
+
+  require_command jq
+  require_command typst
+
+  require_config
+  require_file "$TEMPLATE_FILE"
+
+  local customer_json
+  customer_json="$(jq -ce --arg id "$customer" '.customers[$id] // empty' "$CONFIG_FILE")" ||
+    die "unknown customer: $customer"
+
+  local -a item_jsons=()
+  local spec
+  for spec in "${item_specs[@]}"; do
+    item_jsons+=("$(parse_item "$spec")")
+  done
+
+  local issued due
+  issued="$(date "+%Y-%m-%d")"
+  due="$(date_after_days "$DUE_DAYS")"
+
+  local year stamp
+  year="${issued:0:4}"
+  stamp="${issued:0:4}${issued:5:2}"
+
+  local month_dir="$INVOICES_DIR/$year"
+  mkdir -p "$month_dir"
+
+  local seq number invoice_file invoice_file_tmp
+  seq="$(next_sequence_number "$month_dir" "$stamp")"
+  printf -v number '%s%02d' "$stamp" "$seq"
+  invoice_file="$month_dir/$INVOICE_PREFIX$number.json"
+  invoice_file_tmp="$invoice_file.tmp"
+
+  [[ ! -e $invoice_file ]] || die "refusing to overwrite $invoice_file"
+
+  local items_json
+  items_json="$(printf '%s\n' "${item_jsons[@]}" | jq -s -c '.')"
+
+  local has_note=false
+  if [[ $has_note_flag -eq 1 ]]; then
+    has_note=true
+  fi
+
+  jq -n \
+    --arg number "$number" \
+    --arg issued "$issued" \
+    --arg due "$due" \
+    --arg note "$note" \
+    --argjson has_note "$has_note" \
+    --argjson supplier "$(jq -c '.supplier' "$CONFIG_FILE")" \
+    --argjson customer "$customer_json" \
+    --argjson items "$items_json" \
+    '{
+       number: $number,
+       supplier: $supplier,
+       customer: $customer,
+       issued: $issued,
+       due: $due
+     }
+     + (if $has_note then {note: $note} else {} end)
+     + {items: $items}' >"$invoice_file_tmp"
+
+  local invoice_pdf="$INVOICE_PREFIX$number.pdf"
+  render_pdf "$invoice_file_tmp" "$out_dir/$invoice_pdf"
+  mv "$invoice_file_tmp" "$invoice_file"
+  printf 'Invoice generated: %s\nData file stored: %s\n' \
+    "$out_dir/$invoice_pdf" "$(display_path "$invoice_file")" >&2
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "$1 not found in PATH"
+}
+
+require_config() {
+  require_file "$CONFIG_FILE"
+  jq -e 'type == "object"' "$CONFIG_FILE" >/dev/null 2>&1 ||
+    die "$(display_path "$CONFIG_FILE") is not a valid JSON file"
+  jq -e '(.supplier | type) == "object" and (.customers | type) == "object"' \
+    "$CONFIG_FILE" >/dev/null 2>&1 ||
+    die "$(display_path "$CONFIG_FILE") must hold \"supplier\" and \"customers\" objects"
+}
+
+require_file() {
+  [[ -f "$1" ]] || die "missing $(display_path "$1")"
+  [[ -r "$1" ]] || die "cannot read $(display_path "$1")"
+}
+
+parse_item() {
+  local spec title hours rate
+  local -r RE_ITEM='^(.+)[[:space:]]+h=([^[:space:]]+)[[:space:]]+r=([^[:space:]]+)$'
+  local -r RE_HOURS='^[0-9]+$'
+  local -r RE_RATE='^[0-9]+([.][0-9]+)?$'
+
+  spec="$(trim "$1")"
+
+  [[ $spec =~ $RE_ITEM ]] ||
+    die "cannot parse item: $spec (expected \"<title> h=<hours> r=<rate>\")"
+  title="${BASH_REMATCH[1]}"
+  hours="${BASH_REMATCH[2]}"
+  rate="${BASH_REMATCH[3]}"
+
+  title="$(trim "$title")"
+  [[ -n $title ]] || die "empty title in item: $spec"
+
+  [[ $hours =~ $RE_HOURS ]] ||
+    die "invalid hours in item: $spec (got \"$hours\", expected a whole number)"
+  [[ $rate =~ $RE_RATE ]] || die "invalid rate in item: $spec (got \"$rate\")"
+
+  printf -v rate '%.2f' "$rate"
+
+  jq -n -c --arg title "$title" --argjson hours "$hours" --arg rate "$rate" \
+    '{title: $title, hours: $hours, rate: $rate}'
+}
+
+trim() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+date_after_days() {
+  local days="$1" shifted
+  if shifted="$(date -v+"${days}"d "+%Y-%m-%d" 2>/dev/null)"; then
+    printf '%s\n' "$shifted"
+  else
+    date -d "+${days} days" "+%Y-%m-%d"
+  fi
+}
+
+next_sequence_number() {
+  local month_dir="$1" stamp="$2"
+  local max=0 f n
+
+  shopt -s nullglob
+  for f in "$month_dir/$INVOICE_PREFIX$stamp"[0-9][0-9].json; do
+    n="${f##*/"$INVOICE_PREFIX$stamp"}"
+    n="${n%.json}"
+    # Strip leading zeros so bash arithmetic reads it as a number.
+    if ((10#$n > max)); then
+      max=$((10#$n))
+    fi
+  done
+  shopt -u nullglob
+
+  local seq=$((max + 1))
+  ((seq <= 99)) || die "more than 99 invoices for $stamp; numbering scheme exhausted"
+  printf '%s\n' "$seq"
+}
+
+render_pdf() {
+  local invoice_file="$1" invoice_pdf="$2" rel
+
+  # typst resolves --input relative to --root, not the working directory.
+  rel="${invoice_file#"$INVOICR_HOME"/}"
+  [[ $rel != "$invoice_file" ]] || die "invoice is not inside $(display_path "$INVOICR_HOME")"
+
+  # Typst has no flag to silence warnings, and the template emits a known
+  # "current font is not designed for math" one. Capture its diagnostics and
+  # drop them on success; print them only when the compile actually fails, so
+  # real errors are never hidden. stdout stays empty either way.
+  local log
+  if ! log="$(typst compile \
+    --root "$INVOICR_HOME" \
+    --input "data=$rel" \
+    "$TEMPLATE_FILE" \
+    "$invoice_pdf" 2>&1 >/dev/null)"; then
+    [[ -n $log ]] && printf '%s\n' "$log" >&2
+    rm -f "$invoice_file"
+    die "typst compile failed"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# utils
+# ---------------------------------------------------------------------------
+
+display_path() {
+  local path="$1"
+  if [[ $path == "$HOME"/* ]]; then
+    printf '~/%s' "${path#"$HOME"/}"
+  else
+    printf '%s' "$path"
+  fi
+}
+
+usage_error() {
+  printf 'error: %s\n' "$*" >&2
+  exit 2
+}
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+main "$@"
