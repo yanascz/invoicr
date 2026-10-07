@@ -22,11 +22,16 @@ main() {
   fi
 
   case "$1" in
-    invoice) shift ;;
+    invoice)
+      shift
+      cmd_invoice "$@"
+      ;;
+    stats)
+      shift
+      cmd_stats "$@"
+      ;;
     *) usage_error "unknown command: $1" ;;
   esac
-
-  cmd_invoice "$@"
 }
 
 # ---------------------------------------------------------------------------
@@ -36,6 +41,7 @@ main() {
 usage() {
   cat <<EOF
 usage: $PROG invoice -c <customer> -i <item> [-i <item>...] [-n <note>] [-o <dir>]
+       $PROG stats -y <year>
 
 Generate a PDF invoice into the current directory, or into <dir> if given, and
 store the invoice JSON under $(display_path "$INVOICES_DIR")/<year>/.
@@ -44,13 +50,18 @@ Configuration is read from $(display_path "$CONFIG_FILE").
 
 commands:
   invoice    create a new invoice
+  stats      summarise the invoices of one year
 
-options:
+invoice options:
   -c, --customer <id>   customer id, a key under "customers" in config.json (required)
   -i, --item <spec>     invoice line item, repeatable (required, at least one)
   -n, --note <text>     note printed on the invoice
   -o, --out-dir <dir>   directory for the PDF; must already exist
                         (default: the current directory)
+
+stats options:
+  -y, --year <year>     year to summarise, four digits
+                        (default: the current year)
 
 item spec:
   "<title> h=<hours> r=<rate>"
@@ -185,24 +196,6 @@ cmd_invoice() {
     "$out_dir/$invoice_pdf" "$(display_path "$invoice_file")" >&2
 }
 
-require_command() {
-  command -v "$1" >/dev/null 2>&1 || die "$1 not found in PATH"
-}
-
-require_config() {
-  require_file "$CONFIG_FILE"
-  jq -e 'type == "object"' "$CONFIG_FILE" >/dev/null 2>&1 ||
-    die "$(display_path "$CONFIG_FILE") is not a valid JSON file"
-  jq -e '(.supplier | type) == "object" and (.customers | type) == "object"' \
-    "$CONFIG_FILE" >/dev/null 2>&1 ||
-    die "$(display_path "$CONFIG_FILE") must hold \"supplier\" and \"customers\" objects"
-}
-
-require_file() {
-  [[ -f "$1" ]] || die "missing $(display_path "$1")"
-  [[ -r "$1" ]] || die "cannot read $(display_path "$1")"
-}
-
 parse_item() {
   local spec title hours rate
   local -r RE_ITEM='^(.+)[[:space:]]+h=([^[:space:]]+)[[:space:]]+r=([^[:space:]]+)$'
@@ -290,8 +283,73 @@ render_pdf() {
 }
 
 # ---------------------------------------------------------------------------
+# stats
+# ---------------------------------------------------------------------------
+
+cmd_stats() {
+  local year=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -y | --year)
+        [[ $# -ge 2 ]] || usage_error "$1 requires an argument"
+        year="$2"
+        shift 2
+        ;;
+      *) usage_error "unexpected argument: $1" ;;
+    esac
+  done
+
+  [[ -n $year ]] || year="$(date "+%Y")"
+  [[ $year =~ ^[0-9]{4}$ ]] || die "invalid year: $year (expected four digits)"
+
+  require_command jq
+
+  local year_dir="$INVOICES_DIR/$year"
+  local -a records=()
+  local f
+  shopt -s nullglob
+  for f in "$year_dir/$INVOICE_PREFIX"*.json; do
+    records+=("$f")
+  done
+  shopt -u nullglob
+
+  # Without this branch jq would read stdin when handed no files at all.
+  local count=0 total=0
+  if [[ ${#records[@]} -gt 0 ]]; then
+    count="$(jq -s 'length' "${records[@]}")"
+    total="$(jq -s '
+      [.[].items[] | .hours * (.rate | tonumber)] | add // 0
+    ' "${records[@]}")"
+  fi
+
+  # printf rather than jq for the trailing zero: tostring drops it (121151.5).
+  # LC_ALL=C above keeps the decimal point a dot in any user locale.
+  printf 'Year %s Statistics\n\nInvoices count: %s\nTotal invoiced: %.2f Kč\n' \
+    "$year" "$count" "$total"
+}
+
+# ---------------------------------------------------------------------------
 # utils
 # ---------------------------------------------------------------------------
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "$1 not found in PATH"
+}
+
+require_config() {
+  require_file "$CONFIG_FILE"
+  jq -e 'type == "object"' "$CONFIG_FILE" >/dev/null 2>&1 ||
+    die "$(display_path "$CONFIG_FILE") is not a valid JSON file"
+  jq -e '(.supplier | type) == "object" and (.customers | type) == "object"' \
+    "$CONFIG_FILE" >/dev/null 2>&1 ||
+    die "$(display_path "$CONFIG_FILE") must hold \"supplier\" and \"customers\" objects"
+}
+
+require_file() {
+  [[ -f "$1" ]] || die "missing $(display_path "$1")"
+  [[ -r "$1" ]] || die "cannot read $(display_path "$1")"
+}
 
 display_path() {
   local path="$1"
