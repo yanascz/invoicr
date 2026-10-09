@@ -36,12 +36,12 @@ invoicr invoice -c cnb -n "Fakturu lze zaplatit i hotově, nebo bitcoinem." \
 ```
 
 ```
-Invoice generated: ./faktura-20261001.pdf
-Data file stored: ~/.invoicr/invoices/2026/faktura-20261001.json
+./faktura-20261001.pdf
 ```
 
 The PDF is stored in the current directory; `-o <dir>` stores it elsewhere.
 Invoice numbers are `YYYYMMNN`, allocated per month and never reused.
+A record of every invoice is kept as JSON in `~/.invoicr/invoices/<year>/`.
 
 ### Summarise a year
 

@@ -189,11 +189,11 @@ cmd_invoice() {
      + (if $has_note then {note: $note} else {} end)
      + {items: $items}' >"$invoice_file_tmp"
 
-  local invoice_pdf="$INVOICE_PREFIX$number.pdf"
-  render_pdf "$invoice_file_tmp" "$out_dir/$invoice_pdf"
+  local invoice_pdf="$out_dir/$INVOICE_PREFIX$number.pdf"
+  render_pdf "$invoice_file_tmp" "$invoice_pdf"
   mv "$invoice_file_tmp" "$invoice_file"
-  printf 'Invoice generated: %s\nData file stored: %s\n' \
-    "$out_dir/$invoice_pdf" "$(display_path "$invoice_file")" >&2
+
+  printf '%s\n' "$invoice_pdf"
 }
 
 parse_item() {
